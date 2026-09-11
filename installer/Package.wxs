@@ -4,8 +4,13 @@
       Id="AgrimaBajpai.AGMAN"
       Name="AGMAN"
       Manufacturer="Agrima Bajpai"
-      Version="1.0.0"
+      Version="1.0.1"
       Scope="perMachine">
+
+    <!-- IMPORTANT:
+         Embed the cabinet inside the MSI so AGMANSetup.msi is a single
+         self-contained installer and does not need cab1.cab beside it. -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="AGMAN">
