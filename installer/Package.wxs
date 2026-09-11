@@ -7,26 +7,37 @@
       Version="1.0.0"
       Scope="perMachine">
 
-    <StandardDirectory Id="ProgramFilesFolder">
+    <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="AGMAN">
-        <File Id="AGMANExe" Source="..\dist\AGMAN\AGMAN.exe">
+        <File
+            Id="AGMANExe"
+            Source="!(bindpath.AGMANBuild)\AGMAN.exe"
+            KeyPath="yes">
+
           <Shortcut
               Id="AGMANStartMenuShortcut"
               Directory="ProgramMenuFolder"
               Name="AGMAN"
               Description="Launch AGMAN"
-              WorkingDirectory="INSTALLFOLDER" />
+              WorkingDirectory="INSTALLFOLDER"
+              Advertise="yes" />
+
           <Shortcut
               Id="AGMANDesktopShortcut"
               Directory="DesktopFolder"
               Name="AGMAN"
               Description="Launch AGMAN"
-              WorkingDirectory="INSTALLFOLDER" />
-        </File>
+              WorkingDirectory="INSTALLFOLDER"
+              Advertise="yes" />
 
-        <Files Include="..\dist\AGMAN\_internal\**" Subdirectory="_internal" />
+        </File>
       </Directory>
     </StandardDirectory>
+
+    <Files
+        Include="!(bindpath.AGMANBuild)\_internal\**"
+        Directory="INSTALLFOLDER"
+        Subdirectory="_internal" />
 
     <StandardDirectory Id="ProgramMenuFolder" />
     <StandardDirectory Id="DesktopFolder" />

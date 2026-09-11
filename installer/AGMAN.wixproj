@@ -2,5 +2,12 @@
   <PropertyGroup>
     <OutputName>AGMANSetup</OutputName>
     <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
   </PropertyGroup>
+
+  <ItemGroup>
+    <BindPath Include="$(MSBuildProjectDirectory)\..\dist\AGMAN">
+      <BindName>AGMANBuild</BindName>
+    </BindPath>
+  </ItemGroup>
 </Project>
