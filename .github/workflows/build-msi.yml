@@ -1,0 +1,44 @@
+name: Build AGMAN MSI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+
+    steps:
+      - name: Get AGMAN code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build AGMAN Windows app
+        run: |
+          pyinstaller --noconfirm --clean --windowed --onedir --name AGMAN main.py
+
+      - name: Build AGMAN MSI installer
+        run: |
+          dotnet build installer/AGMAN.wixproj -c Release
+
+      - name: Upload AGMAN MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGMAN-Installer
+          path: installer/bin/Release/*.msi

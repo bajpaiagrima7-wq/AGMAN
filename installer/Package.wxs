@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Id="AgrimaBajpai.AGMAN"
+      Name="AGMAN"
+      Manufacturer="Agrima Bajpai"
+      Version="1.0.0"
+      Scope="perMachine">
+
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="AGMAN">
+        <File Id="AGMANExe" Source="..\dist\AGMAN\AGMAN.exe">
+          <Shortcut
+              Id="AGMANStartMenuShortcut"
+              Directory="ProgramMenuFolder"
+              Name="AGMAN"
+              Description="Launch AGMAN"
+              WorkingDirectory="INSTALLFOLDER" />
+          <Shortcut
+              Id="AGMANDesktopShortcut"
+              Directory="DesktopFolder"
+              Name="AGMAN"
+              Description="Launch AGMAN"
+              WorkingDirectory="INSTALLFOLDER" />
+        </File>
+
+        <Files Include="..\dist\AGMAN\_internal\**" Subdirectory="_internal" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+
+  </Package>
+</Wix>
