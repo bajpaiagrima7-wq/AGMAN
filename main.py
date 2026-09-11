@@ -5,6 +5,17 @@ import json
 import array
 from pathlib import Path
 
+from game.camera import Camera
+from game.runner_world import RunnerWorld, WORLD_WIDTH, WORLD_HEIGHT
+from game.inventory import Inventory
+from game.loot import LootSystem
+from game.missions import MissionSystem
+from game.weapons import WeaponSystem
+from game.zone import CollapsingZone
+from game.camps import CampSystem
+from game.levels import CampaignLevels
+from game.rescue import RescueSystem
+
 # ============================================================
 # AGMAN - Stage 5
 # Python 3.12 + pygame-ce
@@ -30,6 +41,18 @@ pygame.draw.circle(app_icon, (12, 12, 18), (40, 26), 2)
 pygame.display.set_icon(app_icon)
 
 clock = pygame.time.Clock()
+
+# Stage 8 world: a 3 km run-and-gun race to the finish line.
+city = RunnerWorld()
+camera = Camera(WIDTH, HEIGHT, WORLD_WIDTH, WORLD_HEIGHT, look_ahead_x=260)
+inventory = Inventory()
+loot = LootSystem(city)
+missions = MissionSystem()
+weapons = WeaponSystem(city)
+zone = CollapsingZone(city)
+camps = CampSystem(city)
+campaign = CampaignLevels()
+rescue = RescueSystem(city)
 
 # ------------------------- FONTS -----------------------------
 
@@ -109,6 +132,7 @@ DEFAULT_SETTINGS = {
     "music": True,
     "difficulty": "MEDIUM",
     "high_score": 0,
+    "highest_campaign_level": 1,
 }
 
 
@@ -130,6 +154,7 @@ def load_settings():
     data["music"] = bool(data["music"])
     data["difficulty"] = data["difficulty"] if data["difficulty"] in DIFFICULTIES else "MEDIUM"
     data["high_score"] = max(0, int(data["high_score"]))
+    data["highest_campaign_level"] = max(1, min(10, int(data.get("highest_campaign_level", 1))))
     return data
 
 
@@ -147,6 +172,7 @@ def save_settings():
         "music": music_enabled,
         "difficulty": selected_difficulty,
         "high_score": high_score,
+        "highest_campaign_level": highest_campaign_level,
     }
     try:
         SAVE_FILE.write_text(json.dumps(payload, indent=2))
@@ -236,6 +262,8 @@ display_mode = settings["display_mode"]
 brightness = settings["brightness"]
 selected_difficulty = settings["difficulty"]
 high_score = settings["high_score"]
+highest_campaign_level = settings["highest_campaign_level"]
+campaign_level = 1
 
 # ------------------------ BACKGROUND -------------------------
 
@@ -251,7 +279,8 @@ stars = [
 
 # -------------------------- PLAYER ---------------------------
 
-player = pygame.Vector2(WIDTH // 2, HEIGHT // 2)
+player = city.spawn.copy()
+camera.snap(player)
 player_radius = 24
 player_speed = 330
 max_health = 100
@@ -338,12 +367,23 @@ ENEMY_TYPES = {
 # ------------------------- GAME STATE ------------------------
 
 score = 0
+boss_kills = 0
+invincible_until = 0
 wave = 1
 wave_timer = 0.0
 boss_waves_spawned = set()
 
 announcement_text = ""
 announcement_timer = 0.0
+
+race_started_ticks = 0
+race_elapsed = 0.0
+distance_announced = set()
+finish_bonus_awarded = False
+victory_rects = {}
+level_select_rects = {}
+final_boss_spawned = False
+final_boss_defeated = False
 
 game_state = "SPLASH"
 splash_started = pygame.time.get_ticks()
@@ -394,6 +434,8 @@ def current_background_colour():
 
 def announce(message, seconds=1.8):
     global announcement_text, announcement_timer
+    global race_started_ticks, race_elapsed, distance_announced
+    global finish_bonus_awarded, final_boss_spawned, final_boss_defeated
     announcement_text = message
     announcement_timer = seconds
 
@@ -484,8 +526,9 @@ def draw_grid():
 
 
 def aim_direction():
-    mouse = pygame.Vector2(pygame.mouse.get_pos())
-    direction = mouse - player
+    # Mouse is in screen coordinates; player is in world coordinates.
+    mouse_world = camera.screen_to_world(pygame.mouse.get_pos())
+    direction = mouse_world - player
     if direction.length() == 0:
         return pygame.Vector2(1, 0)
     return direction.normalize()
@@ -641,10 +684,11 @@ def draw_human(pos, scale=1.0, aiming=True):
 
 
 def draw_player():
+    screen_pos = camera.world_to_screen(player)
     if character_choice == "MONSTER":
-        draw_monster(player)
+        draw_monster(screen_pos)
     else:
-        draw_human(player)
+        draw_human(screen_pos)
 
 
 # ============================================================
@@ -684,7 +728,7 @@ def draw_splash():
     screen.blit(title, title.get_rect(center=(WIDTH // 2, 105)))
 
     sub = SMALL_FONT.render(
-        "MASTER THE FLAME • SURVIVE THE SWARM",
+        "RESCUE • RUN • SHOOT • ESCORT EVERYONE TO EXTRACTION",
         True,
         text_colour(),
     )
@@ -744,7 +788,7 @@ def draw_menu():
     screen.blit(title, title.get_rect(center=(WIDTH // 2, 87 + title_bob)))
 
     sub = SMALL_FONT.render(
-        "CHOOSE YOUR HERO • MASTER THE FLAME • SURVIVE",
+        "RUN • SHOOT • SURVIVE • REACH THE FINISH LINE",
         True,
         text_colour(),
     )
@@ -768,21 +812,132 @@ def draw_menu():
         "EXIT": exit_btn,
     }
 
-    draw_button(play, "PLAY", font=BUTTON_FONT)
+    draw_button(play, "PLAY / LEVELS", font=BUTTON_FONT)
     draw_button(settings_btn, "PLAYER LAB / SETTINGS")
     draw_button(rules, "HOW TO PLAY")
     draw_button(exit_btn, "EXIT GAME")
 
     speed_pct = int(DIFFICULTIES[selected_difficulty]["enemy_speed"] * 100)
     summary = TINY_FONT.render(
-        f"{character_choice} • {display_mode} • {selected_difficulty} ({speed_pct}% enemy speed) • HIGH SCORE {high_score}",
+        f"{character_choice} • {selected_difficulty} • LEVELS UNLOCKED {highest_campaign_level}/10 • HIGH SCORE {high_score}",
         True,
         muted_colour(),
     )
     screen.blit(summary, summary.get_rect(center=(WIDTH // 2, 640)))
 
-    version = TINY_FONT.render("AGMAN • Stage 6 • Final Polish", True, muted_colour())
+    version = TINY_FONT.render("AGMAN • Stage 9 • 10-Level Campaign", True, muted_colour())
     screen.blit(version, version.get_rect(center=(WIDTH // 2, 680)))
+
+
+
+def draw_level_select():
+    global level_select_rects
+    level_select_rects = {}
+
+    title = HEADING_FONT.render(
+        "SELECT CAMPAIGN LEVEL",
+        True,
+        theme()["accent"],
+    )
+    screen.blit(title, title.get_rect(center=(WIDTH // 2, 52)))
+
+    subtitle = TINY_FONT.render(
+        f"Clear a level to unlock the next • {highest_campaign_level}/10 unlocked",
+        True,
+        muted_colour(),
+    )
+    screen.blit(subtitle, subtitle.get_rect(center=(WIDTH // 2, 88)))
+
+    card_w = 218
+    card_h = 205
+    gap_x = 22
+    start_x = 45
+    row_y = [125, 355]
+
+    for i in range(1, 11):
+        row = 0 if i <= 5 else 1
+        col = (i - 1) % 5
+
+        rect = pygame.Rect(
+            start_x + col * (card_w + gap_x),
+            row_y[row],
+            card_w,
+            card_h,
+        )
+
+        level_select_rects[i] = rect
+
+        unlocked = i <= highest_campaign_level
+        config = campaign.get(i)
+
+        fill = panel_colour() if unlocked else (
+            (36, 38, 48) if display_mode == "DARK" else (205, 208, 216)
+        )
+
+        pygame.draw.rect(screen, fill, rect, border_radius=14)
+        pygame.draw.rect(
+            screen,
+            theme()["accent"] if unlocked else muted_colour(),
+            rect,
+            2,
+            border_radius=14,
+        )
+
+        number = HEADING_FONT.render(
+            str(i),
+            True,
+            theme()["accent"] if unlocked else muted_colour(),
+        )
+        screen.blit(number, number.get_rect(center=(rect.centerx, rect.y + 38)))
+
+        name = TINY_FONT.render(
+            config["name"],
+            True,
+            text_colour() if unlocked else muted_colour(),
+        )
+        screen.blit(name, name.get_rect(center=(rect.centerx, rect.y + 79)))
+
+        tag = pygame.font.Font(None, 18).render(
+            config["tagline"],
+            True,
+            muted_colour(),
+        )
+        screen.blit(tag, tag.get_rect(center=(rect.centerx, rect.y + 105)))
+
+        threat = min(10, i)
+        friend_count = rescue.friend_count_for_level(i)
+
+        rescue_text = pygame.font.Font(None, 18).render(
+            f"RESCUE {friend_count} FRIEND{'S' if friend_count != 1 else ''}",
+            True,
+            theme()["accent_2"] if unlocked else muted_colour(),
+        )
+        screen.blit(
+            rescue_text,
+            rescue_text.get_rect(center=(rect.centerx, rect.y + 130)),
+        )
+
+        threat_text = TINY_FONT.render(
+            f"THREAT {'●' * min(5, 1 + (threat - 1) // 2)}",
+            True,
+            (255, 105, 110) if unlocked else muted_colour(),
+        )
+        screen.blit(
+            threat_text,
+            threat_text.get_rect(center=(rect.centerx, rect.y + 153)),
+        )
+
+        status = "PLAY" if unlocked else "LOCKED"
+        status_colour = theme()["accent_2"] if unlocked else muted_colour()
+        status_text = SMALL_FONT.render(status, True, status_colour)
+        screen.blit(
+            status_text,
+            status_text.get_rect(center=(rect.centerx, rect.bottom - 24)),
+        )
+
+    back = pygame.Rect(WIDTH // 2 - 120, 590, 240, 52)
+    level_select_rects["BACK"] = back
+    draw_button(back, "BACK")
 
 
 def draw_settings():
@@ -870,16 +1025,30 @@ def draw_rules():
             90,
             [
                 ("MISSION", True),
+                ("10 campaign levels • each is a 5 km survival run.", False),
+                ("Clear each level to unlock the next.", False),
+                ("MAIN MISSION: rescue every trapped friend.", False),
+                ("Press E beside a cage to unlock your friend.", False),
+                ("Rescued friends follow you to extraction.", False),
+                ("The finish stays LOCKED until everyone is rescued.", False),
                 ("Survive as long as possible.", False),
                 ("Defeat enemies with your fire attack.", False),
                 ("Collect XP gems and evolve.", False),
                 ("Bosses arrive every 5 waves.", False),
                 ("", False),
                 ("CONTROLS", True),
-                ("WASD / Arrow Keys  —  Move", False),
+                ("D / Right  —  run faster forward", False),
+                ("A / Left  —  slow down / move back", False),
+                ("W/S or Up/Down  —  change running lane", False),
                 ("Mouse  —  Aim", False),
                 ("Hold Left Click  —  Fire", False),
                 ("P  —  Pause / Resume", False),
+                ("E  —  Open crates / use Safehouse", False),
+                ("Q  —  Use medkit", False),
+                ("TAB  —  Survival inventory", False),
+                ("1 / 2 / 3  —  switch weapons", False),
+                ("Search vehicle wrecks for guns/ammo", False),
+                ("Keep ahead of the collapsing zone", False),
                 ("ESC  —  Pause during gameplay", False),
             ],
         ),
@@ -935,41 +1104,54 @@ def draw_rules():
 def shoot():
     global last_shot
 
+    if weapons.fallback_if_empty():
+        announce("OUT OF AMMO • FIRE BLASTER", 0.8)
+
+    profile = weapons.shot_profile(
+        shoot_delay,
+        fireball_damage,
+        fireball_radius,
+        multishot,
+    )
+
     now = pygame.time.get_ticks()
-    if now - last_shot < shoot_delay:
+
+    if now - last_shot < profile["delay"]:
         return
 
     direction = aim_direction()
 
-    if multishot == 1:
-        angles = [0]
-    elif multishot == 2:
-        angles = [-6, 6]
-    else:
-        angles = [-10, 0, 10]
-
-    for angle in angles:
+    for angle in profile["angles"]:
         shot_dir = direction.rotate(angle)
         start = player + shot_dir * 35
 
         fireballs.append(
             {
                 "position": start.copy(),
-                "velocity": shot_dir * fireball_speed,
-                "life": 1.25,
-                "damage": fireball_damage,
+                "velocity": shot_dir * profile["speed"],
+                "life": profile["life"],
+                "damage": profile["damage"],
+                "radius": profile["radius"],
+                "colour": profile["colour"],
+                "trail": profile["trail"],
             }
         )
 
-        for _ in range(3):
+        for _ in range(profile["particles"]):
             fire_particles.append(
                 {
                     "position": start.copy(),
-                    "velocity": shot_dir.rotate(random.uniform(-35, 35)) * random.uniform(35, 95),
+                    "velocity": shot_dir.rotate(
+                        random.uniform(-35, 35)
+                    )
+                    * random.uniform(35, 105),
                     "life": random.uniform(0.15, 0.35),
                     "size": random.randint(2, 5),
+                    "colour": profile["colour"],
                 }
             )
+
+    weapons.consume_ammo()
 
     if shoot_sound:
         shoot_sound.play()
@@ -985,10 +1167,11 @@ def update_fireballs(dt):
 
         if (
             x < -60
-            or x > WIDTH + 60
+            or x > WORLD_WIDTH + 60
             or y < -60
-            or y > HEIGHT + 60
+            or y > WORLD_HEIGHT + 60
             or fireball["life"] <= 0
+            or city.is_blocked_point(fireball["position"], 2)
         ):
             fireballs.remove(fireball)
 
@@ -1004,22 +1187,63 @@ def update_particles(dt):
 
 def draw_fire():
     for p in fire_particles:
-        colour = YELLOW if p["life"] > 0.16 else ORANGE
+        sp = camera.world_to_screen(p["position"])
+
+        if -30 < sp.x < WIDTH + 30 and -30 < sp.y < HEIGHT + 30:
+            colour = p.get("colour", ORANGE)
+
+            pygame.draw.circle(
+                screen,
+                colour,
+                (int(sp.x), int(sp.y)),
+                max(1, p["size"]),
+            )
+
+    for fireball in fireballs:
+        sp = camera.world_to_screen(fireball["position"])
+
+        if not (
+            -60 < sp.x < WIDTH + 60
+            and -60 < sp.y < HEIGHT + 60
+        ):
+            continue
+
+        vel = fireball["velocity"]
+        tail = sp - vel.normalize() * 17
+        x, y = int(sp.x), int(sp.y)
+
+        colour = fireball.get("colour", YELLOW)
+        trail = fireball.get("trail", ORANGE)
+        radius = fireball.get("radius", fireball_radius)
+
+        pygame.draw.line(
+            screen,
+            trail,
+            (x, y),
+            (int(tail.x), int(tail.y)),
+            5,
+        )
+
+        draw_glow_circle(
+            screen,
+            trail,
+            (x, y),
+            radius + 2,
+        )
+
         pygame.draw.circle(
             screen,
             colour,
-            (int(p["position"].x), int(p["position"].y)),
-            max(1, p["size"]),
+            (x, y),
+            radius,
         )
 
-    for fireball in fireballs:
-        x, y = int(fireball["position"].x), int(fireball["position"].y)
-        vel = fireball["velocity"]
-        tail = pygame.Vector2(x, y) - vel.normalize() * 17
-        pygame.draw.line(screen, ORANGE, (x, y), (int(tail.x), int(tail.y)), 5)
-        draw_glow_circle(screen, ORANGE, (x, y), fireball_radius + 2)
-        pygame.draw.circle(screen, YELLOW, (x, y), fireball_radius)
-        pygame.draw.circle(screen, WHITE, (x, y), 3)
+        pygame.draw.circle(
+            screen,
+            WHITE,
+            (x, y),
+            max(2, radius // 2),
+        )
 
 
 # ============================================================
@@ -1028,17 +1252,15 @@ def draw_fire():
 
 
 def spawn_position():
-    side = random.choice(("TOP", "BOTTOM", "LEFT", "RIGHT"))
-    if side == "TOP":
-        return pygame.Vector2(random.randint(0, WIDTH), -70)
-    if side == "BOTTOM":
-        return pygame.Vector2(random.randint(0, WIDTH), HEIGHT + 70)
-    if side == "LEFT":
-        return pygame.Vector2(-70, random.randint(0, HEIGHT))
-    return pygame.Vector2(WIDTH + 70, random.randint(0, HEIGHT))
+    return city.spawn_near(
+        player,
+        min_distance=720,
+        max_distance=1050,
+        radius=55,
+    )
 
 
-def create_enemy(kind=None):
+def create_enemy(kind=None, position=None, tag=None):
     if kind is None:
         roll = random.random()
         if wave < 3:
@@ -1049,12 +1271,28 @@ def create_enemy(kind=None):
             kind = "BLOB" if roll < 0.40 else "BAT" if roll < 0.72 else "TANK"
 
     data = ENEMY_TYPES[kind]
-    pos = spawn_position()
+    pos = (
+        pygame.Vector2(position)
+        if position is not None
+        else spawn_position()
+    )
 
     wave_hp = 1.0 if kind == "BOSS" else 1 + (wave - 1) * 0.10
-    hp = max(1, int(data["health"] * wave_hp))
+    level_config = campaign.get(campaign_level)
+    hp = max(
+        1,
+        int(
+            data["health"]
+            * wave_hp
+            * level_config["enemy_health"]
+        ),
+    )
 
-    speed_scale = DIFFICULTIES[selected_difficulty]["enemy_speed"]
+    level_config = campaign.get(campaign_level)
+    speed_scale = (
+        DIFFICULTIES[selected_difficulty]["enemy_speed"]
+        * level_config["enemy_speed"]
+    )
 
     enemies.append(
         {
@@ -1064,19 +1302,24 @@ def create_enemy(kind=None):
             "speed": (data["speed"] + (wave - 1) * 2) * speed_scale,
             "health": hp,
             "max_health": hp,
-            "damage": data["damage"],
+            "damage": max(1, int(data["damage"] * level_config["enemy_damage"])),
             "score": data["score"],
             "xp": data["xp"],
             "body": data["body"],
             "belly": data["belly"],
+            "tag": tag,
         }
     )
 
 
 def draw_enemy(enemy):
-    x = int(enemy["position"].x)
-    y = int(enemy["position"].y)
+    sp = camera.world_to_screen(enemy["position"])
+    x = int(sp.x)
+    y = int(sp.y)
     r = enemy["radius"]
+
+    if x < -r * 3 or x > WIDTH + r * 3 or y < -r * 3 or y > HEIGHT + r * 3:
+        return
 
     draw_glow_circle(screen, enemy["body"], (x, y), r)
     pygame.draw.circle(screen, enemy["body"], (x, y), r)
@@ -1110,17 +1353,38 @@ def draw_enemy(enemy):
 
 
 def update_enemies(dt):
-    global health, score
+    global health, score, boss_kills, final_boss_defeated
 
     for enemy in enemies[:]:
         direction = player - enemy["position"]
 
         if direction.length() > 0:
             direction = direction.normalize()
-            enemy["position"] += direction * enemy["speed"] * dt
+            step = direction * enemy["speed"] * dt
+            before = enemy["position"].copy()
+            moved = city.move_actor(
+                enemy["position"],
+                step,
+                max(10, enemy["radius"] * 0.72),
+            )
+
+            # If a building blocks direct pursuit, try steering around it.
+            if moved.distance_to(before) < step.length() * 0.20:
+                side = direction.rotate(55 if random.random() < 0.5 else -55)
+                moved = city.move_actor(
+                    enemy["position"],
+                    side * enemy["speed"] * dt,
+                    max(10, enemy["radius"] * 0.72),
+                )
+
+            enemy["position"] = moved
 
         if enemy["position"].distance_to(player) < enemy["radius"] + player_radius:
-            health -= enemy["damage"]
+            # Armor absorbs damage before HP.
+            damage_to_health = inventory.absorb_damage(enemy["damage"])
+
+            if pygame.time.get_ticks() >= invincible_until:
+                health -= damage_to_health
 
             if hit_sound:
                 hit_sound.play()
@@ -1134,7 +1398,7 @@ def update_enemies(dt):
         for fireball in fireballs[:]:
             if (
                 enemy["position"].distance_to(fireball["position"])
-                < enemy["radius"] + fireball_radius
+                < enemy["radius"] + fireball.get("radius", fireball_radius)
             ):
                 enemy["health"] -= fireball["damage"]
 
@@ -1147,6 +1411,14 @@ def update_enemies(dt):
 
                     score += enemy["score"]
                     drop_xp(enemy["position"], enemy["xp"])
+                    loot.spawn_enemy_drop(enemy["position"], enemy["type"])
+
+                    if enemy["type"] == "BOSS":
+                        boss_kills += 1
+
+                    if enemy.get("tag") == "FINAL_BOSS":
+                        final_boss_defeated = True
+                        announce("FINAL BOSS DEFEATED • REACH EXTRACTION!", 2.5)
 
                     for _ in range(10):
                         fire_particles.append(
@@ -1215,8 +1487,13 @@ def update_xp_gems(dt):
 
 def draw_xp_gems():
     for gem in xp_gems:
-        x = int(gem["position"].x)
-        y = int(gem["position"].y)
+        sp = camera.world_to_screen(gem["position"])
+        x = int(sp.x)
+        y = int(sp.y)
+
+        if not (-20 < x < WIDTH + 20 and -20 < y < HEIGHT + 20):
+            continue
+
         points = [(x, y - 8), (x + 7, y), (x, y + 8), (x - 7, y)]
         pygame.draw.polygon(screen, XP_COLOUR, points)
         pygame.draw.polygon(screen, WHITE, points, 1)
@@ -1342,10 +1619,282 @@ def draw_boss_bar():
     screen.blit(txt, txt.get_rect(center=(WIDTH // 2, y - 13)))
 
 
+def draw_race_hud():
+    distance = city.distance_km(player)
+    progress = city.progress_ratio(player)
+
+    # Campaign level label.
+    config = campaign.get(campaign_level)
+    campaign_text = TINY_FONT.render(
+        f"CAMPAIGN {campaign_level}/10 • {config['name']}",
+        True,
+        theme()["accent_2"],
+    )
+    screen.blit(
+        campaign_text,
+        campaign_text.get_rect(center=(WIDTH // 2, 49)),
+    )
+
+    # Central target panel.
+    panel = pygame.Rect(WIDTH // 2 - 225, 72, 450, 78)
+    overlay = pygame.Surface((panel.width, panel.height), pygame.SRCALPHA)
+    overlay.fill((5, 7, 14, 190))
+    screen.blit(overlay, panel.topleft)
+    pygame.draw.rect(screen, theme()["accent"], panel, 2, border_radius=12)
+
+    distance_text = HEADING_FONT.render(
+        f"FINISH  {distance:.2f} KM",
+        True,
+        theme()["accent"],
+    )
+    screen.blit(distance_text, distance_text.get_rect(center=(WIDTH // 2, 101)))
+
+    # Race progress bar.
+    bar = pygame.Rect(panel.x + 28, panel.y + 55, panel.width - 56, 10)
+    pygame.draw.rect(screen, (70, 75, 90), bar, border_radius=5)
+    pygame.draw.rect(
+        screen,
+        theme()["accent_2"],
+        (bar.x, bar.y, int(bar.width * progress), bar.height),
+        border_radius=5,
+    )
+
+    friend_counter = SMALL_FONT.render(
+        f"FRIENDS {rescue.rescued_count}/{rescue.total}",
+        True,
+        theme()["accent_2"] if rescue.all_rescued else YELLOW,
+    )
+    screen.blit(
+        friend_counter,
+        (25, 340),
+    )
+
+    # Timer.
+    timer_text = SMALL_FONT.render(
+        f"TIME  {race_elapsed:05.1f}s",
+        True,
+        text_colour(),
+    )
+    screen.blit(timer_text, (WIDTH - timer_text.get_width() - 25, 92))
+
+    # Permanent target direction.
+    arrow = SMALL_FONT.render(
+        "FINISH  >>>",
+        True,
+        theme()["accent"],
+    )
+    screen.blit(arrow, (WIDTH - arrow.get_width() - 25, 124))
+
+
+def draw_survival_hud():
+    # Armor bar
+    x, y = 25, 105
+    bar_w, bar_h = 200, 13
+
+    pygame.draw.rect(screen, panel_colour(), (x, y, bar_w, bar_h), border_radius=7)
+    pygame.draw.rect(
+        screen,
+        (90, 180, 255),
+        (x, y, int(bar_w * inventory.armor / inventory.max_armor), bar_h),
+        border_radius=7,
+    )
+    pygame.draw.rect(screen, text_colour(), (x, y, bar_w, bar_h), 1, border_radius=7)
+
+    armor_text = TINY_FONT.render(f"ARMOR {inventory.armor}", True, text_colour())
+    screen.blit(armor_text, (x, y + 18))
+
+    # Coins and lifelines
+    coin_text = SMALL_FONT.render(f"COINS  {inventory.coins}", True, YELLOW)
+    screen.blit(coin_text, (25, 150))
+
+    heart_colour = (255, 80, 120)
+    heart_x = 28
+    heart_y = 190
+
+    for i in range(inventory.max_lifelines):
+        cx = heart_x + i * 35
+        active = i < inventory.lifelines
+        colour = heart_colour if active else (80, 80, 90)
+
+        pygame.draw.circle(screen, colour, (cx - 5, heart_y - 3), 6)
+        pygame.draw.circle(screen, colour, (cx + 5, heart_y - 3), 6)
+        pygame.draw.polygon(
+            screen,
+            colour,
+            [(cx - 11, heart_y), (cx + 11, heart_y), (cx, heart_y + 14)],
+        )
+
+    medkit_text = TINY_FONT.render(
+        f"MEDKITS {inventory.medkits}  •  Q TO USE",
+        True,
+        text_colour(),
+    )
+    screen.blit(medkit_text, (25, 215))
+
+    # Objective panel
+    panel = pygame.Rect(25, 250, 320, 76)
+    overlay = pygame.Surface((panel.width, panel.height), pygame.SRCALPHA)
+    overlay.fill((5, 7, 14, 185))
+    screen.blit(overlay, panel.topleft)
+    pygame.draw.rect(screen, theme()["accent"], panel, 2, border_radius=10)
+
+    objective_label = TINY_FONT.render("MAIN MISSION", True, theme()["accent"])
+
+    if not rescue.all_rescued:
+        mission_name = rescue.objective_text()
+    else:
+        mission_name = "ESCORT FRIENDS TO FINISH"
+
+    objective = TINY_FONT.render(
+        mission_name,
+        True,
+        WHITE,
+    )
+    secondary_text = missions.progress_text(
+        inventory,
+        city.distance_km(player),
+        city.finished(player),
+    )
+
+    progress = TINY_FONT.render(
+        f"{rescue.rescued_count}/{rescue.total} rescued • {secondary_text}",
+        True,
+        SOFT_GREY,
+    )
+
+    screen.blit(objective_label, (panel.x + 12, panel.y + 9))
+    screen.blit(objective, (panel.x + 12, panel.y + 31))
+    screen.blit(progress, (panel.x + 12, panel.y + 52))
+
+    # Interaction prompt
+    prompt = rescue.prompt(player) or weapons.prompt(player) or loot.prompt(player)
+
+    if prompt:
+        prompt_surface = SMALL_FONT.render(prompt, True, WHITE)
+        prompt_box = prompt_surface.get_rect(
+            center=(WIDTH // 2, HEIGHT - 74)
+        ).inflate(30, 20)
+
+        fade = pygame.Surface((prompt_box.width, prompt_box.height), pygame.SRCALPHA)
+        fade.fill((5, 7, 14, 210))
+        screen.blit(fade, prompt_box.topleft)
+        pygame.draw.rect(screen, theme()["accent"], prompt_box, 2, border_radius=12)
+        screen.blit(prompt_surface, prompt_surface.get_rect(center=prompt_box.center))
+
+
+def draw_inventory_overlay():
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 205))
+    screen.blit(overlay, (0, 0))
+
+    title = HEADING_FONT.render("AGMAN SURVIVAL PACK", True, theme()["accent"])
+    screen.blit(title, title.get_rect(center=(WIDTH // 2, 90)))
+
+    left = 300
+    top = 170
+    lines = [
+        ("COINS", str(inventory.coins)),
+        ("LIFELINES", f"{inventory.lifelines}/{inventory.max_lifelines}"),
+        ("MEDKITS", str(inventory.medkits)),
+        ("ARMOR", f"{inventory.armor}/{inventory.max_armor}"),
+        ("CRATES OPENED", str(inventory.crates_opened)),
+        ("FIRE DAMAGE", str(fireball_damage)),
+        ("FIRE STREAMS", str(multishot)),
+        ("MOVE SPEED", str(int(player_speed))),
+        ("WEAPON", weapons.current),
+        ("RIFLE AMMO", str(weapons.ammo["PLASMA RIFLE"])),
+        ("SHOTGUN", str(weapons.ammo["FLAME SHOTGUN"])),
+    ]
+
+    for i, (label, value) in enumerate(lines):
+        y = top + i * 45
+        screen.blit(SMALL_FONT.render(label, True, SOFT_GREY), (left, y))
+        value_surface = SMALL_FONT.render(value, True, WHITE)
+        screen.blit(value_surface, (760, y))
+
+    help_text = SMALL_FONT.render(
+        "TAB CLOSE • Q MEDKIT • E LOOT • 1/2/3 WEAPONS",
+        True,
+        theme()["accent_2"],
+    )
+    screen.blit(help_text, help_text.get_rect(center=(WIDTH // 2, 590)))
+
+
+def draw_weapon_and_zone_hud():
+    # Weapon panel
+    weapon_panel = pygame.Rect(
+        WIDTH - 315,
+        105,
+        290,
+        78,
+    )
+
+    overlay = pygame.Surface(
+        (weapon_panel.width, weapon_panel.height),
+        pygame.SRCALPHA,
+    )
+    overlay.fill((5, 7, 14, 190))
+    screen.blit(overlay, weapon_panel.topleft)
+
+    pygame.draw.rect(
+        screen,
+        theme()["accent"],
+        weapon_panel,
+        2,
+        border_radius=10,
+    )
+
+    label = TINY_FONT.render(
+        "WEAPON",
+        True,
+        theme()["accent"],
+    )
+
+    current = SMALL_FONT.render(
+        weapons.current,
+        True,
+        WHITE,
+    )
+
+    ammo = TINY_FONT.render(
+        f"AMMO {weapons.ammo_text()}  •  1/2/3 SWITCH",
+        True,
+        SOFT_GREY,
+    )
+
+    screen.blit(label, (weapon_panel.x + 12, weapon_panel.y + 8))
+    screen.blit(current, (weapon_panel.x + 12, weapon_panel.y + 28))
+    screen.blit(ammo, (weapon_panel.x + 12, weapon_panel.y + 54))
+
+    # Zone status
+    zone_colour = (
+        RED
+        if zone.danger_level(player) >= 2
+        else theme()["accent_2"]
+    )
+
+    zone_text = TINY_FONT.render(
+        zone.hud_text(player),
+        True,
+        zone_colour,
+    )
+
+    screen.blit(
+        zone_text,
+        (
+            WIDTH - zone_text.get_width() - 25,
+            192,
+        ),
+    )
+
+
 def draw_hud():
     draw_health_bar()
     draw_xp_bar()
     draw_boss_bar()
+    draw_race_hud()
+    draw_survival_hud()
+    draw_weapon_and_zone_hud()
 
     score_text = HUD_FONT.render(f"SCORE: {score}", True, theme()["accent"])
     screen.blit(score_text, (WIDTH - score_text.get_width() - 25, 20))
@@ -1357,8 +1906,15 @@ def draw_hud():
     )
     screen.blit(wave_text, (WIDTH - wave_text.get_width() - 25, 56))
 
+    location_text = TINY_FONT.render(
+        city.district_at(player),
+        True,
+        theme()["accent_2"],
+    )
+    screen.blit(location_text, (25, 80))
+
     info = TINY_FONT.render(
-        "WASD MOVE • HOLD LEFT CLICK FIRE • P PAUSE",
+        "RUN • SHOOT • 1/2/3 WEAPONS • E LOOT • ZONE IS CLOSING",
         True,
         text_colour(),
     )
@@ -1425,7 +1981,7 @@ def draw_game_over():
     screen.blit(best_text, best_text.get_rect(center=(WIDTH // 2, 320)))
 
     detail = TINY_FONT.render(
-        f"LEVEL {level} • WAVE {wave} • {selected_difficulty}",
+        f"CAMPAIGN {campaign_level}/10 • {city.distance_km(player):.2f} KM LEFT • XP LV {level} • COINS {inventory.coins}",
         True,
         muted_colour(),
     )
@@ -1453,6 +2009,67 @@ def draw_game_over():
     draw_button(exit_btn, "EXIT GAME")
 
 
+def draw_victory():
+    global victory_rects
+
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 180))
+    screen.blit(overlay, (0, 0))
+
+    config = campaign.get(campaign_level)
+
+    title_text = "CAMPAIGN COMPLETE!" if campaign_level == 10 else f"LEVEL {campaign_level} CLEARED!"
+    title = TITLE_FONT.render(title_text, True, theme()["accent"])
+    screen.blit(title, title.get_rect(center=(WIDTH // 2, 120)))
+
+    sub = HEADING_FONT.render(config["name"], True, WHITE)
+    screen.blit(sub, sub.get_rect(center=(WIDTH // 2, 190)))
+
+    stat_lines = [
+        f"TIME: {race_elapsed:.1f} seconds",
+        f"SCORE: {score}",
+        f"COINS: {inventory.coins}",
+        f"XP LEVEL: {level}",
+        f"LIFELINES LEFT: {inventory.lifelines}",
+        f"FRIENDS RESCUED: {rescue.rescued_count}/{rescue.total}",
+    ]
+
+    for i, line in enumerate(stat_lines):
+        txt = SMALL_FONT.render(line, True, WHITE)
+        screen.blit(txt, txt.get_rect(center=(WIDTH // 2, 245 + i * 30)))
+
+    victory_rects = {}
+
+    if campaign_level < 10:
+        next_rect = pygame.Rect(WIDTH // 2 - 170, 455, 340, 58)
+        victory_rects["NEXT"] = next_rect
+        draw_button(next_rect, f"NEXT: LEVEL {campaign_level + 1}", active=True)
+
+        restart_y = 530
+        menu_y = 600
+    else:
+        restart_y = 480
+        menu_y = 555
+
+        completed = SMALL_FONT.render(
+            "ALL 10 LEVELS CLEARED",
+            True,
+            theme()["accent_2"],
+        )
+        screen.blit(completed, completed.get_rect(center=(WIDTH // 2, 430)))
+
+    restart = pygame.Rect(WIDTH // 2 - 150, restart_y, 300, 52)
+    menu = pygame.Rect(WIDTH // 2 - 150, menu_y, 300, 52)
+
+    victory_rects["RESTART"] = restart
+    victory_rects["MENU"] = menu
+
+    draw_button(restart, "RUN THIS LEVEL AGAIN")
+    draw_button(menu, "MAIN MENU")
+
+
+
+
 # ============================================================
 # GAME RESET
 # ============================================================
@@ -1462,11 +2079,12 @@ def reset_game():
     global player, player_speed, health, max_health
     global fireballs, fire_particles, fireball_damage, fireball_radius
     global shoot_delay, last_shot, multishot
-    global enemies, xp_gems, score, level, xp, xp_needed
+    global enemies, xp_gems, score, boss_kills, invincible_until, level, xp, xp_needed
     global wave, wave_timer, boss_waves_spawned, last_enemy_spawn
     global announcement_text, announcement_timer
 
-    player = pygame.Vector2(WIDTH // 2, HEIGHT // 2)
+    player = city.spawn.copy()
+    camera.snap(player)
     player_speed = 330
     max_health = 100
     health = 100
@@ -1483,6 +2101,38 @@ def reset_game():
     xp_gems = []
 
     score = 0
+    boss_kills = 0
+    invincible_until = 0
+
+    config = campaign.get(campaign_level)
+
+    city.set_campaign_level(
+        campaign_level,
+        config["extra_obstacles"],
+    )
+
+    rescue.reset(campaign_level)
+
+    inventory.reset()
+    inventory.armor = min(
+        inventory.max_armor,
+        config["start_armor"],
+    )
+
+    loot.reset()
+    missions.reset()
+    weapons.reset()
+
+    zone.configure(
+        config["zone_speed"],
+        config["zone_grace"],
+        config["zone_damage"],
+    )
+    zone.reset()
+
+    camps.configure(config["camp_bonus"])
+    camps.reset()
+
     level = 1
     xp = 0
     xp_needed = 50
@@ -1492,8 +2142,16 @@ def reset_game():
     boss_waves_spawned = set()
     last_enemy_spawn = pygame.time.get_ticks()
 
-    announcement_text = "WAVE 1"
-    announcement_timer = 1.7
+    race_started_ticks = pygame.time.get_ticks()
+    race_elapsed = 0.0
+    distance_announced = set()
+    finish_bonus_awarded = False
+    final_boss_spawned = False
+    final_boss_defeated = False
+
+    announcement_text = f"LEVEL {campaign_level} • {campaign.name(campaign_level)}"
+
+    announcement_timer = 2.2
 
 
 # ============================================================
@@ -1527,15 +2185,67 @@ while running:
             elif game_state == "PAUSE" and event.key in (pygame.K_p, pygame.K_ESCAPE):
                 game_state = "GAME"
 
+            elif game_state == "GAME" and event.key == pygame.K_TAB:
+                game_state = "INVENTORY"
+
+            elif game_state == "INVENTORY" and event.key in (pygame.K_TAB, pygame.K_ESCAPE):
+                game_state = "GAME"
+
+            elif game_state == "GAME" and event.key == pygame.K_e:
+                if rescue.interact(
+                    player,
+                    announce,
+                ):
+                    pass
+                elif weapons.interact(
+                    player,
+                    inventory,
+                    announce,
+                ):
+                    pass
+                else:
+                    loot.interact(
+                        player,
+                        inventory,
+                        announce,
+                    )
+
+            elif game_state == "GAME" and event.key in (
+                pygame.K_1,
+                pygame.K_2,
+                pygame.K_3,
+            ):
+                slot = {
+                    pygame.K_1: 1,
+                    pygame.K_2: 2,
+                    pygame.K_3: 3,
+                }[event.key]
+
+                if not weapons.select_slot(slot):
+                    announce("WEAPON NOT FOUND YET", 0.9)
+
+            elif game_state == "GAME" and event.key == pygame.K_q:
+                new_health, used = inventory.use_medkit(health, max_health)
+                if used:
+                    health = new_health
+                    announce("MEDKIT USED • +45 HP", 1.3)
+                else:
+                    announce("NO MEDKIT NEEDED", 1.0)
+
             elif event.key == pygame.K_ESCAPE:
-                if game_state in ("SETTINGS", "RULES", "GAMEOVER"):
+                if game_state in ("SETTINGS", "RULES", "GAMEOVER", "LEVEL_SELECT"):
                     game_state = settings_return_state if game_state == "SETTINGS" else "MENU"
 
             if game_state == "MENU" and event.key == pygame.K_RETURN:
+                game_state = "LEVEL_SELECT"
+
+            elif game_state == "GAMEOVER" and event.key == pygame.K_RETURN:
                 reset_game()
                 game_state = "GAME"
 
-            elif game_state == "GAMEOVER" and event.key == pygame.K_RETURN:
+            elif game_state == "VICTORY" and event.key == pygame.K_RETURN:
+                if campaign_level < 10:
+                    campaign_level += 1
                 reset_game()
                 game_state = "GAME"
 
@@ -1552,8 +2262,7 @@ while running:
             # ---------------- MENU ----------------
             if game_state == "MENU":
                 if menu_buttons.get("PLAY", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
-                    reset_game()
-                    game_state = "GAME"
+                    game_state = "LEVEL_SELECT"
 
                 elif menu_buttons.get("SETTINGS", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
                     settings_return_state = "MENU"
@@ -1565,6 +2274,23 @@ while running:
                 elif menu_buttons.get("EXIT", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
                     save_settings()
                     running = False
+
+            # ------------ LEVEL SELECT ------------
+            elif game_state == "LEVEL_SELECT":
+                if level_select_rects.get("BACK", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
+                    game_state = "MENU"
+                else:
+                    for selected_level in range(1, 11):
+                        rect = level_select_rects.get(selected_level)
+                        if (
+                            rect
+                            and rect.collidepoint(event.pos)
+                            and selected_level <= highest_campaign_level
+                        ):
+                            campaign_level = selected_level
+                            reset_game()
+                            game_state = "GAME"
+                            break
 
             # --------------- SETTINGS -------------
             elif game_state == "SETTINGS":
@@ -1625,6 +2351,21 @@ while running:
                         apply_upgrade(i)
                         break
 
+            # ---------------- VICTORY ---------------
+            elif game_state == "VICTORY":
+                if victory_rects.get("NEXT", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
+                    if campaign_level < 10:
+                        campaign_level += 1
+                    reset_game()
+                    game_state = "GAME"
+
+                elif victory_rects.get("RESTART", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
+                    reset_game()
+                    game_state = "GAME"
+
+                elif victory_rects.get("MENU", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
+                    game_state = "MENU"
+
             # --------------- GAME OVER -------------
             elif game_state == "GAMEOVER":
                 if gameover_rects.get("RESTART", pygame.Rect(0, 0, 0, 0)).collidepoint(event.pos):
@@ -1666,22 +2407,36 @@ while running:
 
     if game_state == "GAME":
         keys = pygame.key.get_pressed()
-        movement = pygame.Vector2(0, 0)
+
+        # RUN-AND-GUN:
+        # The runner always pushes toward the finish line.
+        # Obstacles can stop the forward motion, so W/S is used to change lanes.
+        forward_speed = campaign.get(campaign_level)["auto_run"]
+
+        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+            forward_speed += player_speed * 0.72
+
+        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+            forward_speed -= player_speed * 0.62
+
+        lane_direction = 0
 
         if keys[pygame.K_w] or keys[pygame.K_UP]:
-            movement.y -= 1
+            lane_direction -= 1
+
         if keys[pygame.K_s] or keys[pygame.K_DOWN]:
-            movement.y += 1
-        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-            movement.x -= 1
-        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-            movement.x += 1
+            lane_direction += 1
 
-        if movement.length() > 0:
-            player += movement.normalize() * player_speed * dt
+        delta = pygame.Vector2(
+            forward_speed * dt,
+            lane_direction * player_speed * 0.82 * dt,
+        )
 
-        player.x = clamp(player.x, player_radius, WIDTH - player_radius)
-        player.y = clamp(player.y, player_radius, HEIGHT - player_radius)
+        player = city.move_actor(
+            player,
+            delta,
+            player_radius,
+        )
 
         if pygame.mouse.get_pressed()[0]:
             shoot()
@@ -1708,10 +2463,15 @@ while running:
         # Number of enemies rises with waves, but difficulty is
         # primarily controlled by enemy movement speed.
         spawn_delay = max(
-            260,
-            base_enemy_spawn_delay
-            - (wave - 1) * 50
-            - min(score, 3000) // 25,
+            180,
+            int(
+                (
+                    base_enemy_spawn_delay
+                    - (wave - 1) * 50
+                    - min(score, 3000) // 25
+                )
+                / campaign.get(campaign_level)["spawn_rate"]
+            ),
         )
 
         if now - last_enemy_spawn >= spawn_delay:
@@ -1722,13 +2482,153 @@ while running:
         update_particles(dt)
         update_enemies(dt)
         update_xp_gems(dt)
+        loot.update(player, dt, inventory, announce)
+        rescue.update(player, dt)
+
+        # Enemy camps trigger fixed ambushes instead of relying only on
+        # random waves.
+        camp_spawns, camp_message = camps.update(player)
+
+        if camp_message:
+            announce(camp_message, 2.0)
+
+        for camp_kind, camp_position in camp_spawns:
+            create_enemy(
+                camp_kind,
+                camp_position,
+            )
+
+        # Battle-royale-inspired collapsing zone from behind.
+        zone_damage = zone.update(
+            dt,
+            player,
+            city.progress_ratio(player),
+        )
+
+        if zone_damage > 0:
+            health -= zone_damage
+
+        mission_message = missions.update(
+            inventory,
+            city.distance_km(player),
+            city.finished(player),
+        )
+        if mission_message:
+            announce(mission_message, 2.2)
+
+        race_elapsed = max(
+            0.0,
+            (pygame.time.get_ticks() - race_started_ticks) / 1000.0,
+        )
+
+        distance_now = city.distance_km(player)
+
+        missed_rescues = rescue.missed_friends_behind(player)
+
+        if missed_rescues and announcement_timer <= 0:
+            announce(
+                f"FRIEND LEFT BEHIND • GO BACK FOR {missed_rescues[0]['name']}!",
+                1.3,
+            )
+
+        if distance_now <= 4.0 and 4 not in distance_announced:
+            distance_announced.add(4)
+            announce("4 KM TO FINISH!", 1.8)
+
+        if distance_now <= 3.0 and 3 not in distance_announced:
+            distance_announced.add(3)
+            announce("3 KM TO FINISH!", 1.8)
+
+        if distance_now <= 2.0 and 2 not in distance_announced:
+            distance_announced.add(2)
+            announce("2 KM TO FINISH!", 1.8)
+
+        if distance_now <= 1.0 and 1 not in distance_announced:
+            distance_announced.add(1)
+            announce("1 KM TO FINISH • FINAL PUSH!", 2.0)
+
+        # Level 10 has a final extraction boss near the finish.
+        if (
+            campaign.requires_final_boss(campaign_level)
+            and city.distance_km(player) <= 0.40
+            and not final_boss_spawned
+        ):
+            final_boss_spawned = True
+            boss_position = pygame.Vector2(
+                min(city.finish_x - 180, player.x + 520),
+                800,
+            )
+            create_enemy(
+                "BOSS",
+                boss_position,
+                tag="FINAL_BOSS",
+            )
+            announce("FINAL EXTRACTION BOSS!", 2.8)
+
+        if city.finished(player):
+            if not rescue.all_rescued:
+                player.x = city.finish_x - 95
+
+                missed = rescue.missed_friends_behind(player)
+
+                if missed:
+                    announce(
+                        f"FINISH LOCKED • RESCUE {rescue.total - rescue.rescued_count} FRIEND(S)!",
+                        1.8,
+                    )
+                else:
+                    announce(
+                        "FINISH LOCKED • COMPLETE THE RESCUE MISSION!",
+                        1.8,
+                    )
+
+            elif (
+                campaign.requires_final_boss(campaign_level)
+                and not final_boss_defeated
+            ):
+                player.x = city.finish_x - 95
+                announce("FINISH LOCKED • DEFEAT THE FINAL BOSS!", 1.6)
+            else:
+                if not finish_bonus_awarded:
+                    finish_bonus_awarded = True
+                    score += 1000 * campaign_level
+                    inventory.add_coins(100)
+                    update_high_score()
+
+                    if campaign_level < 10:
+                        highest_campaign_level = max(
+                            highest_campaign_level,
+                            campaign_level + 1,
+                        )
+                    else:
+                        highest_campaign_level = 10
+
+                    save_settings()
+
+                game_state = "VICTORY"
 
         if announcement_timer > 0:
             announcement_timer -= dt
 
-        if health <= 0:
-            update_high_score()
-            game_state = "GAMEOVER"
+        if health <= 0 and game_state == "GAME":
+            if inventory.consume_lifeline():
+                health = max(45, max_health // 2)
+                invincible_until = now + 2500
+
+                # Give the player breathing room.
+                enemies = [
+                    enemy
+                    for enemy in enemies
+                    if enemy["position"].distance_to(player) > 260
+                ]
+
+                announce("LIFELINE USED • REVIVED!", 2.0)
+            else:
+                update_high_score()
+                game_state = "GAMEOVER"
+
+    if game_state in ("GAME", "LEVELUP", "PAUSE", "INVENTORY"):
+        camera.update(player, dt)
 
     # -------------------------- DRAW -------------------------
 
@@ -1740,19 +2640,45 @@ while running:
     elif game_state == "MENU":
         draw_menu()
 
+    elif game_state == "LEVEL_SELECT":
+        draw_level_select()
+
     elif game_state == "SETTINGS":
         draw_settings()
 
     elif game_state == "RULES":
         draw_rules()
 
-    elif game_state in ("GAME", "LEVELUP", "PAUSE"):
-        draw_grid()
+    elif game_state in ("GAME", "LEVELUP", "PAUSE", "INVENTORY"):
+        city.draw(screen, camera, theme(), display_mode)
+        zone.draw(screen, camera, player, theme())
+        camps.draw(screen, camera, theme())
+        loot.draw(screen, camera, theme(), text_colour())
+        weapons.draw(screen, camera, theme())
+        rescue.draw(
+            screen,
+            camera,
+            theme(),
+            character_choice,
+        )
         draw_xp_gems()
         draw_fire()
         draw_enemies()
         draw_player()
+        campaign.draw_effect(
+            screen,
+            campaign_level,
+            camera.world_to_screen(player),
+            pygame.time.get_ticks() / 1000.0,
+        )
         draw_hud()
+        city.draw_minimap(
+            screen,
+            player,
+            [enemy["position"] for enemy in enemies],
+            theme()["accent"],
+            text_colour(),
+        )
         draw_announcement()
 
         if game_state == "LEVELUP":
@@ -1761,8 +2687,44 @@ while running:
         elif game_state == "PAUSE":
             draw_pause()
 
+        elif game_state == "INVENTORY":
+            draw_inventory_overlay()
+
     elif game_state == "GAMEOVER":
         draw_game_over()
+
+    elif game_state == "VICTORY":
+        # Freeze the final race scene behind the victory card.
+        city.draw(screen, camera, theme(), display_mode)
+        zone.draw(screen, camera, player, theme())
+        camps.draw(screen, camera, theme())
+        loot.draw(screen, camera, theme(), text_colour())
+        weapons.draw(screen, camera, theme())
+        rescue.draw(
+            screen,
+            camera,
+            theme(),
+            character_choice,
+        )
+        draw_xp_gems()
+        draw_fire()
+        draw_enemies()
+        draw_player()
+        campaign.draw_effect(
+            screen,
+            campaign_level,
+            camera.world_to_screen(player),
+            pygame.time.get_ticks() / 1000.0,
+        )
+        draw_hud()
+        city.draw_minimap(
+            screen,
+            player,
+            [enemy["position"] for enemy in enemies],
+            theme()["accent"],
+            text_colour(),
+        )
+        draw_victory()
 
     pygame.display.flip()
 
